@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子·幻境 v0.1</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #030514; font-family: sans-serif; color: white; user-select: none; }
+        canvas { display: block; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; }
+        .header { padding: 25px 30px; }
+        .title { font-size: 28px; font-weight: 300; letter-spacing: 4px; text-shadow: 0 0 15px rgba(0, 245, 255, 0.8); margin: 0; }
+        .subtitle { font-size: 12px; color: #00f5ff; opacity: 0.7; margin-top: 5px; }
+        #status { position: absolute; top: 30px; right: 30px; font-size: 14px; color: #00f5ff; background: rgba(0,245,255,0.1); padding: 8px 15px; border-radius: 20px; border: 1px solid rgba(0,245,255,0.3); }
+        .bottom-bar { padding: 30px; display: flex; justify-content: center; gap: 20px; pointer-events: auto; }
+        button { background: rgba(0,245,255,0.05); border: 1px solid rgba(0,245,255,0.4); color: #00f5ff; padding: 10px 25px; border-radius: 30px; cursor: pointer; transition: all 0.3s; }
+        button:hover, button.active { background: rgba(0,245,255,0.3); box-shadow: 0 0 15px rgba(0,245,255,0.5); }
+        .video-container { display: none; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } </script>
+</head>
+<body>
+    <div id="ui-layer">
+        <div class="header"><h1 class="title">粒子·幻境 v0.1</h1><div class="subtitle">实时手势交互</div></div>
+        <div id="status">摄像头加载中...</div>
+        <div class="bottom-bar">
+            <button id="btn-nebula" class="active">扩散星云</button>
+            <button id="btn-heart">轨迹心</button>
+            <button id="btn-rings">全部环</button>
+            <button id="btn-restart">打散重组</button>
+        </div>
+    </div>
+    <div class="video-container"><video id="video-input" autoplay playsinline></video></div>
+    <script type="module">
+        import * as THREE from 'three';
+
+        const PARTICLE_COUNT = 12000;
+        const scene = new THREE.Scene(); scene.fog = new THREE.FogExp2(0x030514, 0.001);
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000); camera.position.z = 800;
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight); document.body.appendChild(renderer.domElement);
+
+        function getTexture() {
+            const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+            const ctx = c.getContext('2d'), g = ctx.createRadialGradient(32,32,0,32,32,32);
+            g.addColorStop(0, '#fff'); g.addColorStop(0.2, 'rgba(0,245,255,0.8)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = g; ctx.fillRect(0,0,64,64); return new THREE.CanvasTexture(c);
+        }
+
+        const geometry = new THREE.BufferGeometry(), positions = new Float32Array(PARTICLE_COUNT * 3), targetPositions = new Float32Array(PARTICLE_COUNT * 3), sizes = new Float32Array(PARTICLE_COUNT);
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            positions[i*3] = (Math.random()-0.5)*100; positions[i*3+1] = (Math.random()-0.5)*100; positions[i*3+2] = (Math.random()-0.5)*100; sizes[i] = Math.random()*8+3;
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3)); geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+        const material = new THREE.ShaderMaterial({
+            uniforms: { color: { value: new THREE.Color(0x00f5ff) }, tex: { value: getTexture() } },
+            vertexShader: `attribute float size; void main() { vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_PointSize = size * (800.0 / -mv.z); gl_Position = projectionMatrix * mv; }`,
+            fragmentShader: `uniform vec3 color; uniform sampler2D tex; void main() { gl_FragColor = vec4(color, 1.0) * texture2D(tex, gl_PointCoord); }`,
+            blending: THREE.AdditiveBlending, depthTest: false, transparent: true
+        });
+        const particleSystem = new THREE.Points(geometry, material); scene.add(particleSystem);
+
+        let mode = 'nebula';
+        function updateShape() {
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                if (mode === 'nebula') {
+                    let r = Math.random()*600, t = Math.random()*Math.PI*2;
+                    targetPositions[i*3]=Math.cos(t)*r; targetPositions[i*3+1]=(Math.random()-0.5)*(150-r*0.2); targetPositions[i*3+2]=Math.sin(t)*r;
+                } else if (mode === 'heart') {
+                    let t = Math.random()*Math.PI*2, r = Math.random()*5+15;
+                    targetPositions[i*3]=(16*Math.pow(Math.sin(t),3))*18+(Math.random()-0.5)*r; targetPositions[i*3+1]=(13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t))*18+(Math.random()-0.5)*r; targetPositions[i*3+2]=(Math.random()-0.5)*30;
+                } else if (mode === 'rings') {
+                    let r = 150+(i%4)*100, t = Math.random()*Math.PI*2;
+                    targetPositions[i*3]=Math.cos(t)*r+(Math.random()-0.5)*20; targetPositions[i*3+1]=Math.sin(t)*r*Math.sin(t)*0.5; targetPositions[i*3+2]=Math.sin(t)*r+(Math.random()-0.5)*20;
+                }
+            }
+        }
+        updateShape();
+
+        const btns = ['nebula','heart','rings'].map(id => document.getElementById('btn-'+id));
+        btns.forEach((btn, idx) => btn.onclick = () => { mode = ['nebula','heart','rings'][idx]; btns.forEach(b => b.className=''); btn.className='active'; updateShape(); });
+        document.getElementById('btn-restart').onclick = () => { for(let i=0;i<PARTICLE_COUNT*3;i++) positions[i]=(Math.random()-0.5)*2000; updateShape(); };
+        let handState = 'none', handCenter = new THREE.Vector3(), indexTipPos = new THREE.Vector3();
+        const statEl = document.getElementById('status'), vid = document.getElementById('video-input');
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+        const map3D = (l) => new THREE.Vector3((l.x-0.5)*1200, -(l.y-0.5)*900, -l.z*1000);
+
+        hands.onResults((res) => {
+            if (res.multiHandLandmarks?.length > 0) {
+                statEl.innerText = "手势已捕获"; statEl.style.color = "#00ff88";
+                const lm = res.multiHandLandmarks[0];
+                const wrist=map3D(lm[0]), thumb=map3D(lm[4]), index=map3D(lm[8]), mid=map3D(lm[12]), pinky=map3D(lm[20]);
+                handCenter.copy(wrist).add(mid).multiplyScalar(0.5); indexTipPos.copy(index);
+                
+                const closed = mid.distanceTo(wrist)<150 && pinky.distanceTo(wrist)<150;
+                if (thumb.distanceTo(index)<80 && closed) handState = 'pinch';
+                else if (index.distanceTo(wrist)>250 && closed) handState = 'point';
+                else if (mid.distanceTo(wrist)>250 && pinky.distanceTo(wrist)>200) handState = 'open';
+                else handState = 'hover';
+            } else { statEl.innerText = "未检测到手势"; statEl.style.color = "#00f5ff"; handState = 'none'; }
+        });
+
+        new Camera(vid, { onFrame: async () => await hands.send({image: vid}), width: 640, height: 480 }).start();
+
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime(), posArr = geometry.attributes.position.array;
+            
+            if (handState === 'none' || handState === 'open') { particleSystem.rotation.y = time*0.1; particleSystem.rotation.z = time*0.05; }
+            else { particleSystem.rotation.y *= 0.95; particleSystem.rotation.z *= 0.95; }
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                let tx = targetPositions[i*3], ty = targetPositions[i*3+1], tz = targetPositions[i*3+2], spd = 0.03;
+                if (handState === 'pinch') {
+                    let r = Math.random()*40, t = Math.random()*6.28, p = Math.acos(Math.random()*2-1);
+                    tx = handCenter.x+r*Math.sin(p)*Math.cos(t); ty = handCenter.y+r*Math.sin(p)*Math.sin(t); tz = handCenter.z+r*Math.cos(p); spd = 0.15;
+                } else if (handState === 'open') {
+                    let d = Math.sqrt((posArr[i*3]-handCenter.x)**2 + (posArr[i*3+1]-handCenter.y)**2 + (posArr[i*3+2]-handCenter.z)**2);
+                    if (d < 300) { let f = (300-d)/300; tx = posArr[i*3]+(posArr[i*3]-handCenter.x)*f*2; ty = posArr[i*3+1]+(posArr[i*3+1]-handCenter.y)*f*2; tz = posArr[i*3+2]+(posArr[i*3+2]-handCenter.z)*f*2; spd = 0.1; }
+                } else if (handState === 'point') {
+                    let yo = (Math.random()-0.5)*400, r = Math.abs(yo)*0.5+20, a = time*5+yo*0.05+i*0.01;
+                    tx = indexTipPos.x+Math.cos(a)*r; ty = indexTipPos.y+yo; tz = indexTipPos.z+Math.sin(a)*r; spd = 0.08;
+                }
+                tx += Math.sin(time+i)*2; ty += Math.cos(time+i*0.5)*2;
+                posArr[i*3] += (tx-posArr[i*3])*spd; posArr[i*3+1] += (ty-posArr[i*3+1])*spd; posArr[i*3+2] += (tz-posArr[i*3+2])*spd;
+            }
+            geometry.attributes.position.needsUpdate = true; renderer.render(scene, camera);
+        }
+        animate();
+        window.onresize = () => { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); };
+    </script>
+</body>
+</html>

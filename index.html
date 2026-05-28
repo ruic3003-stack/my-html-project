@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>迷谳 3D 粒子交互系统</title>
+    <style>
+        body, html { 
+            margin: 0; padding: 0; width: 100%; height: 100%; 
+            overflow: hidden; background-color: #000; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* 渲染画布 */
+        canvas { display: block; width: 100vw; height: 100vh; }
+
+        /* 摄像头小窗：放置在右下角，镜像翻转 */
+        #video-container { 
+            position: absolute; bottom: 20px; right: 20px; 
+            width: 110px; height: 82px; 
+            border: 1.5px solid rgba(0, 255, 255, 0.4); 
+            border-radius: 10px; overflow: hidden; 
+            transform: scaleX(-1); z-index: 10;
+            background: #000;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+
+        /* 左上角 UI 控制面板容器 */
+        #ui-container { position: absolute; top: 15px; left: 15px; z-index: 100; }
+        
+        /* 右上角全屏切换按钮 */
+        .fullscreen-btn { 
+            position: absolute; top: 15px; right: 15px; 
+            padding: 10px 18px; background: rgba(255, 255, 255, 0.1); 
+            border: 1px solid rgba(255, 255, 255, 0.2); color: #fff; 
+            border-radius: 20px; cursor: pointer; backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px); font-size: 13px; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-container"></div>
+    <div id="video-container"><video id="video" playsinline></video></div>
+    <button class="fullscreen-btn" onclick="toggleFullScreen()">全屏模式</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.17.0/dist/lil-gui.umd.min.js"></script>
+
+    <script>
+    // 此处开始为 JavaScript 逻辑，见下一段
+        let scene, camera, renderer, particles, geometry;
+        let particleCount = 15000; 
+        let targetPositions = new Float32Array(particleCount * 3);
+        let currentHandScale = 1.0;
+        let rotationVelocity = { y: 0, z: 0 };
+        let lastIndexX = 0;
+        let isTextMode = false;
+
+        // --- 1. 初始化 3D 渲染器 ---
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 6;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // 粒子几何体
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            for(let i=0; i<particleCount*3; i++) {
+                positions[i] = (Math.random() - 0.5) * 15;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            // 材质：混合模式设为加法，增强发光感
+            const material = new THREE.PointsMaterial({
+                size: 0.03,
+                color: 0x00ffff,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        // --- 2. 文字点云生成 (迷谳牛逼) ---
+        function generateTextPoints(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 400;
+            canvas.height = 200;
+            
+            // 绘制文字到离屏 Canvas
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 60px "PingFang SC", "Microsoft YaHei", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, 200, 100);
+            
+            const imageData = ctx.getImageData(0, 0, 400, 200).data;
+            const points = [];
+            
+            // 像素采样：每隔两像素采样一次提高效率
+            for (let y = 0; y < 200; y += 2) {
+                for (let x = 0; x < 400; x += 2) {
+                    const alpha = imageData[(y * 400 + x) * 4 + 3];
+                    if (alpha > 128) {
+                        points.push(
+                            (x - 200) * 0.035, // X 居中
+                            (100 - y) * 0.035, // Y 居中
+                            (Math.random() - 0.5) * 0.2 // Z 轴微量厚度
+                        );
+                    }
+                }
+            }
+
+            // 将文字坐标均匀映射到所有粒子
+            for (let i = 0; i < particleCount; i++) {
+                const pIdx = (i % (points.length / 3)) * 3;
+                targetPositions[i*3] = points[pIdx];
+                targetPositions[i*3+1] = points[pIdx+1];
+                targetPositions[i*3+2] = points[pIdx+2];
+            }
+        }
+
+        // --- 3. 基础几何形状算法 ---
+        function setShape(type) {
+            isTextMode = false;
+            for (let i = 0; i < particleCount; i++) {
+                let x, y, z;
+                const i3 = i * 3;
+                if (type === '爱心') {
+                    const t = Math.random() * Math.PI * 2;
+                    x = 16 * Math.pow(Math.sin(t), 3) * 0.12;
+                    y = (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * 0.12;
+                    z = (Math.random() - 0.5) * 0.2;
+                } else if (type === '土星') {
+                    const r = Math.random() > 0.4 ? (2.8 + Math.random() * 1.2) : 1.8;
+                    const a = Math.random() * Math.PI * 2;
+                    if(r > 2.5) { // 环
+                        x = Math.cos(a) * r;
+                        y = (Math.random() - 0.5) * 0.15;
+                        z = Math.sin(a) * r;
+                    } else { // 球
+                        const p = Math.acos(-1 + Math.random() * 2);
+                        x = r * Math.sin(p) * Math.cos(a);
+                        y = r * Math.sin(p) * Math.sin(a);
+                        z = r * Math.cos(p);
+                    }
+                } else { // 烟花/默认
+                    const r = 3 + Math.random() * 2;
+                    const p = Math.acos(-1 + Math.random() * 2);
+                    const a = Math.random() * Math.PI * 2;
+                    x = r * Math.sin(p) * Math.cos(a);
+                    y = r * Math.sin(p) * Math.sin(a);
+                    z = r * Math.cos(p);
+                }
+                targetPositions[i3] = x;
+                targetPositions[i3+1] = y;
+                targetPositions[i3+2] = z;
+            }
+        }
+        // --- 4. 手势高级判定逻辑 ---
+        const videoElement = document.getElementById('video');
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(results => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hand = results.multiHandLandmarks[0];
+                
+                // 获取关键指尖位置 (4:拇指, 8:食指, 12:中指, 16:无名指, 20:小指)
+                const thumb = hand[4], index = hand[8], middle = hand[12], ring = hand[16], pinky = hand[20];
+                const wrist = hand[0];
+
+                // 判定手指是否伸直 (指尖 y 坐标小于指根 y 坐标)
+                const isIndexUp = index.y < hand[6].y;
+                const isMiddleUp = middle.y < hand[10].y;
+                const isRingUp = ring.y < hand[14].y;
+                const isPinkyUp = pinky.y < hand[18].y;
+                // 判定大拇指向上 (点赞)
+                const isThumbUp = thumb.y < hand[2].y && thumb.y < index.y;
+
+                // 计算挥动位移 (食指尖 X 轴变化)
+                const deltaX = index.x - lastIndexX;
+                lastIndexX = index.x;
+
+                // --- 逻辑分支 ---
+
+                // 需求 5: 只有大拇指向上 (点赞)
+                if (isThumbUp && !isIndexUp && !isMiddleUp) {
+                    if (!isTextMode) {
+                        isTextMode = true;
+                        generateTextPoints("迷谳牛逼");
+                    }
+                } 
+
+                // 需求 2: 食指和中指并拢挥动 -> 平面旋转 (绕Z轴)
+                else if (isIndexUp && isMiddleUp && !isRingUp) {
+                    rotationVelocity.z = deltaX * 25;
+                }
+
+                // 需求 1: 仅食指挥动 -> 立体旋转 (绕Y轴)
+                else if (isIndexUp && !isMiddleUp) {
+                    rotationVelocity.y = deltaX * 25;
+                }
+
+                // 需求 3 & 4: 握拳状态判定
+                const isFist = !isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp;
+                if (isFist) {
+                    // 需求 4: 握拳推拉 (利用手掌中心 z 深度映射缩放)
+                    // MediaPipe 的 z 是相对值，越小(越负)离镜头越近
+                    const zDepth = Math.abs(wrist.z); 
+                    const targetScale = THREE.MathUtils.mapLinear(zDepth, 0, 0.2, 3.5, 0.5);
+                    currentHandScale = THREE.MathUtils.lerp(currentHandScale, targetScale, 0.2);
+                } else {
+                    // 需求 3: 根据手指弯曲程度缩放 (计算平均指尖到腕部距离)
+                    let avgDist = (Math.hypot(index.x-wrist.x, index.y-wrist.y) + 
+                                   Math.hypot(middle.x-wrist.x, middle.y-wrist.y)) / 2;
+                    const targetScale = THREE.MathUtils.mapLinear(avgDist, 0.1, 0.5, 0.4, 2.5);
+                    currentHandScale = THREE.MathUtils.lerp(currentHandScale, targetScale, 0.1);
+                }
+            } else {
+                // 失去手势时，缓慢恢复默认旋转和缩放
+                rotationVelocity.y *= 0.9;
+                rotationVelocity.z *= 0.9;
+                currentHandScale = THREE.MathUtils.lerp(currentHandScale, 1.0, 0.05);
+            }
+        });
+
+        // 启动手势摄像头
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 480, height: 360
+        });
+        // --- 5. 核心动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const posAttribute = geometry.attributes.position;
+            const positions = posAttribute.array;
+
+            // 粒子向目标点平滑插值移动
+            for (let i = 0; i < particleCount * 3; i++) {
+                const targetValue = targetPositions[i] * currentHandScale;
+                // 0.1 是跟随速度，数值越大跟随越紧贴
+                positions[i] += (targetValue - positions[i]) * 0.1; 
+            }
+
+            posAttribute.needsUpdate = true;
+            
+            // 应用手势产生的旋转动量
+            particles.rotation.y += rotationVelocity.y;
+            particles.rotation.z += rotationVelocity.z;
+            
+            // 阻尼效果：让旋转在手停止挥动后自然减速
+            rotationVelocity.y *= 0.95;
+            rotationVelocity.z *= 0.95;
+
+            // 如果不是手势控制旋转，保持一个微弱的自转背景感
+            if(Math.abs(rotationVelocity.y) < 0.001) particles.rotation.y += 0.002;
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 6. UI 控制面板与全屏逻辑 ---
+        function setupUI() {
+            // 手机端 lil-gui 会自动折叠
+            const gui = new lil.GUI({ container: document.getElementById('ui-container'), title: '粒子控制' });
+            
+            const settings = {
+                模型选择: '爱心',
+                粒子颜色: '#00ffff',
+                粒子大小: 0.03,
+                重置场景: function() {
+                    particles.rotation.set(0,0,0);
+                    currentHandScale = 1.0;
+                }
+            };
+
+            gui.add(settings, '模型选择', ['爱心', '土星', '烟花', '球体']).onChange(v => setShape(v));
+            gui.addColor(settings, '粒子颜色').onChange(v => particles.material.color.set(v));
+            gui.add(settings, '粒子大小', 0.01, 0.1).onChange(v => particles.material.size = v);
+            gui.add(settings, '重置场景');
+            
+            // 默认初始化形状
+            setShape('爱心');
+        }
+
+        function toggleFullScreen() {
+            if (!document.fullscreenElement) {
+                // 兼容多浏览器全屏请求
+                const docElm = document.documentElement;
+                if (docElm.requestFullscreen) docElm.requestFullscreen();
+                else if (docElm.webkitRequestFullScreen) docElm.webkitRequestFullScreen();
+            } else {
+                if (document.exitFullscreen) document.exitFullscreen();
+                else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+            }
+        }
+
+        // 窗口尺寸自适应
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 7. 正式启动 ---
+        // 确保在执行前初始化所有组件
+        initThree();
+        setupUI();
+        cameraUtils.start().then(() => {
+            console.log("Camera started");
+            animate();
+        }).catch(err => {
+            alert("请确保已授权摄像头权限：" + err);
+        });
+
+    </script>
+</body>
+</html>
